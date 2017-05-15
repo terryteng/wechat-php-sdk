@@ -4,7 +4,8 @@
  *
  * @author NetPuter <netputer@gmail.com>
  */
-
+  include_once "wxBizMsgCrypt.php";
+  include_once "config.php";
   /**
    * 微信公众平台处理类
    */
@@ -25,22 +26,52 @@
     private $request;
 
     /**
+     * WXBizMsgCrypt
+     *
+     * @var WXBizMsgCrypt
+     */
+    private $msgCryptor;
+
+    /**
+     * If msg is in crypt mode
+     *
+     * @var boolean
+     */
+    private $encrypted = false;
+
+    /**
+     * Store post data from wechat server
+     *
+     * @var string
+     */
+    private $postStr;
+
+    /**
      * 初始化，判断此次请求是否为验证请求，并以数组形式保存
      *
      * @param string $token 验证信息
      * @param boolean $debug 调试模式，默认为关闭
      */
-    public function __construct($token, $debug = FALSE) {
+    public function __construct($config=array('token'=>'', 'aeskey'=>'', 'appid'=>'', 'debug' => FALSE)) {
+
+      $token = $config['token'];
+      $aeskey = $config['aeskey'];
+      $appid = $config['appid'];
+      $debug = $config['debug'];
+
       if (!$this->validateSignature($token)) {
         exit('签名验证失败');
       }
-      
-      if ($this->isValid()) {
+
+      if ($this->isValidateIncomingConn()) {
         // 网址接入验证
         exit($_GET['echostr']);
       }
-      
-      if (!isset($GLOBALS['HTTP_RAW_POST_DATA'])) {
+
+      if ($_SERVER['REQUEST_METHOD'] == "POST") {
+        $this->postStr = file_get_contents("php://input");
+      }
+      if (!isset($this->postStr)) {
         exit('缺少数据');
       }
 
@@ -48,7 +79,31 @@
       set_error_handler(array(&$this, 'errorHandler'));
       // 设置错误处理函数，将错误通过文本消息回复显示
 
-      $xml = (array) simplexml_load_string($GLOBALS['HTTP_RAW_POST_DATA'], 'SimpleXMLElement', LIBXML_NOCDATA);
+      if (isset($_GET['encrypt_type'])) {
+        $this->encrypted = $_GET['encrypt_type'] == 'aes';
+      }
+
+      if ($this->encrypted) {
+        $this->msgCryptor = new wxBizMsgCrypt($token, $aeskey, $appid);
+      }
+
+      $this->savePostData();
+
+    }
+
+    private function savePostData() {
+      $xml = '';
+
+      if ($this->encrypted) {
+        $errCode = $this->msgCryptor->decryptMsg($_GET['msg_signature'], $_GET['timestamp'], $_GET['nonce'], $this->postStr, $xml);
+
+        if ($errCode != 0) exit($errCode);
+
+      } else {
+        $xml = $this->postStr;
+      }
+
+      $xml = (array) simplexml_load_string($xml, 'SimpleXMLElement', LIBXML_NOCDATA);
 
       $this->request = array_change_key_case($xml, CASE_LOWER);
       // 将数组键名转换为小写，提高健壮性，减少因大小写不同而出现的问题
@@ -59,7 +114,7 @@
      *
      * @return boolean
      */
-    private function isValid() {
+    private function isValidateIncomingConn() {
       return isset($_GET['echostr']);
     }
 
@@ -73,13 +128,13 @@
       if ( ! (isset($_GET['signature']) && isset($_GET['timestamp']) && isset($_GET['nonce']))) {
         return FALSE;
       }
-      
+
       $signature = $_GET['signature'];
       $timestamp = $_GET['timestamp'];
       $nonce = $_GET['nonce'];
 
       $signatureArray = array($token, $timestamp, $nonce);
-      sort($signatureArray);
+      sort($signatureArray,SORT_STRING);
 
       return sha1(implode($signatureArray)) == $signature;
     }
@@ -147,11 +202,53 @@
     protected function onLink() {}
 
     /**
+     * 收到自定义菜单消息时触发，用于子类重写
+     *
+     * @return void
+     */
+    protected function onClick() {}
+
+    /**
+     * 收到地理位置事件消息时触发，用于子类重写
+     *
+     * @return void
+     */
+    protected function onEventLocation() {}
+
+    /**
+     * 收到语音消息时触发，用于子类重写
+     *
+     * @return void
+     */
+    protected function onVoice() {}
+
+    /**
+     * 扫描二维码时触发，用于子类重写
+     *
+     * @return void
+     */
+    protected function onScan() {}
+
+    /**
      * 收到未知类型消息时触发，用于子类重写
      *
      * @return void
      */
     protected function onUnknown() {}
+
+
+    /**
+      * 输出消息
+      * @return [encypted] msg
+      */
+
+    private function sendout($msg) {
+      if ($this->encrypted) {
+        $errCode = $this->msgCryptor->encryptMsg($msg, $this->getRequest('timestamp'), $this->getRequest('nonce'), $msg);
+        if ($errCode != 0) exit ($errCode);
+      }
+      exit($msg);
+    }
 
     /**
      * 回复文本消息
@@ -161,7 +258,7 @@
      * @return void
      */
     protected function responseText($content, $funcFlag = 0) {
-      exit(new TextResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $content, $funcFlag));
+      $this->sendout(new TextResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $content, $funcFlag));
     }
 
     /**
@@ -175,7 +272,7 @@
      * @return void
      */
     protected function responseMusic($title, $description, $musicUrl, $hqMusicUrl, $funcFlag = 0) {
-      exit(new MusicResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $title, $description, $musicUrl, $hqMusicUrl, $funcFlag));
+      $this->sendout(new MusicResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $title, $description, $musicUrl, $hqMusicUrl, $funcFlag));
     }
 
     /**
@@ -185,7 +282,7 @@
      * @return void
      */
     protected function responseNews($items, $funcFlag = 0) {
-      exit(new NewsResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $items, $funcFlag));
+      $this->sendout(new NewsResponse($this->getRequest('fromusername'), $this->getRequest('tousername'), $items, $funcFlag));
     }
 
     /**
@@ -205,6 +302,18 @@
 
             case 'unsubscribe':
               $this->onUnsubscribe();
+              break;
+
+            case 'SCAN':
+              $this->onScan();
+              break;
+
+            case 'LOCATION':
+              $this->onEventLocation();
+              break;
+
+            case 'CLICK':
+              $this->onClick();
               break;
 
           }
@@ -227,6 +336,10 @@
           $this->onLink();
           break;
 
+        case 'voice':
+          $this->onVoice();
+          break;
+
         default:
           $this->onUnknown();
           break;
@@ -242,7 +355,7 @@
      * @param  int $line    产生错误的行数
      * @return void
      */
-    protected function errorHandler($level, $msg, $file, $line) {
+    public function errorHandler($level, $msg, $file, $line) {
       if ( ! $this->debug) {
         return;
       }
